@@ -1,13 +1,18 @@
 /**
  * Created by climax on 2015/03/27.
  */
-import com.codahale.metrics.*;
+
+import com.codahale.metrics.Meter;
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.Slf4jReporter;
 import org.apache.commons.cli.*;
 import org.apache.commons.lang3.RandomStringUtils;
-import redis.clients.jedis.*;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import redis.clients.jedis.Pipeline;
 
 import java.util.concurrent.TimeUnit;
 
@@ -36,6 +41,7 @@ public class BenchRedisProducer implements Runnable {
     private int messages;
     private Jedis jedis;
     private JedisPool pool;
+
     public BenchRedisProducer(String[] args) {
         options.addOption("h", "help", false, "prints this message");
         options.addOption("P", "pipeline", true, "add this option to enable pipelining, with an optional parameter indicating the batch size");
@@ -51,43 +57,49 @@ public class BenchRedisProducer implements Runnable {
         parseCommandLine(args);
         pool = new JedisPool(new JedisPoolConfig(), hostname, port);
     }
+
+    public static void main(String[] args) throws Exception {
+        BenchRedisProducer producer = new BenchRedisProducer(args);
+        producer.run();
+    }
+
     private void parseCommandLine(String[] args) {
         CommandLineParser commandLineParser = new BasicParser();
         try {
             CommandLine commandLine = commandLineParser.parse(options, args);
-            if(commandLine.hasOption('h')) {
+            if (commandLine.hasOption('h')) {
                 printHelp();
             }
 
             hostname = commandLine.getOptionValue('i', "localhost");
             port = Integer.parseInt(commandLine.getOptionValue('p', "6379"));
             pipeline = Integer.parseInt(commandLine.getOptionValue('P', "50"));
-            if(pipeline < 0) {
+            if (pipeline < 0) {
                 throw new ParseException("pipeline must be >= 1");
             }
             threads = Integer.parseInt(commandLine.getOptionValue('n', String.valueOf(Runtime.getRuntime().availableProcessors())));
-            if(threads <= 0) {
+            if (threads <= 0) {
                 throw new ParseException("threads must be >= 1");
             }
             baseTopic = commandLine.getOptionValue('b', "bench");
             topic = commandLine.getOptionValue('t', "");
             size = Integer.parseInt(commandLine.getOptionValue('s', "512"));
-            if(size < 0) {
+            if (size < 0) {
                 throw new ParseException("size must be >= 0");
             }
             duration = Integer.parseInt(commandLine.getOptionValue('d', "0"));
-            if(duration < 0) {
-               throw new ParseException("duration must be >= 0");
+            if (duration < 0) {
+                throw new ParseException("duration must be >= 0");
             }
             delay = Integer.parseInt(commandLine.getOptionValue('D', "0"));
-            if(delay < 0) {
+            if (delay < 0) {
                 throw new ParseException("delay must be >= 0");
             }
             messages = Integer.parseInt(commandLine.getOptionValue('m', "1000000"));
-            if(messages < 0) {
+            if (messages < 0) {
                 throw new ParseException("messages must be >= 0");
             }
-            if(messages == 0 && duration == 0) {
+            if (messages == 0 && duration == 0) {
                 throw new ParseException("messages or duration must be > 0");
             }
         } catch (ParseException e) {
@@ -95,6 +107,7 @@ public class BenchRedisProducer implements Runnable {
             printHelp();
         }
     }
+
     public void printHelp() {
         formatter.printHelp("Help", options);
         System.exit(0);
@@ -105,15 +118,15 @@ public class BenchRedisProducer implements Runnable {
         final Thread[] threadGroup = new Thread[threads];
         reporter.start(5, TimeUnit.SECONDS);
         LOGGER.info("Starting {} threads", threads);
-        for(int i = 0; i < threads; ++i) {
+        for (int i = 0; i < threads; ++i) {
             threadGroup[i] = new Thread(new BenchRunner(), "Producer-" + Integer.toString(i));
             threadGroup[i].start();
         }
         Thread timeKiller = null;
-        if(duration > 0) {
+        if (duration > 0) {
             timeKiller = new Thread(new Runnable() {
                 @Override
-                public void run(){
+                public void run() {
                     try {
                         Thread.sleep(duration * 1000);
                         LOGGER.info("Time expired interrupting workers");
@@ -129,12 +142,12 @@ public class BenchRedisProducer implements Runnable {
         }
 
         for (Thread thread : threadGroup) {
-            try{
+            try {
                 thread.join();
             } catch (InterruptedException e) {
             }
         }
-        if(timeKiller != null) {
+        if (timeKiller != null) {
             timeKiller.interrupt();
         }
         LOGGER.info("Bench done.");
@@ -143,23 +156,18 @@ public class BenchRedisProducer implements Runnable {
 
     }
 
-    public static void main(String[] args) throws Exception {
-        BenchRedisProducer producer = new BenchRedisProducer(args);
-        producer.run();
-    }
-
     public final class BenchRunner implements Runnable {
         @Override
         public void run() {
-            LOGGER.info("{} running...",Thread.currentThread().getName());
+            LOGGER.info("{} running...", Thread.currentThread().getName());
             String message = RandomStringUtils.randomAlphanumeric(size);
-            try(Jedis jedis = pool.getResource()) {
-                if(pipeline > 0) {
-                    for(int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); i+=pipeline) {
+            try (Jedis jedis = pool.getResource()) {
+                if (pipeline > 0) {
+                    for (int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); i += pipeline) {
                         Pipeline pipe = jedis.pipelined();
-                        for(int j = 0; j < pipeline; ++j) {
+                        for (int j = 0; j < pipeline; ++j) {
                             String finalTopic = baseTopic;
-                            if(topic.isEmpty()) {
+                            if (topic.isEmpty()) {
                                 finalTopic += "." + RandomStringUtils.randomAlphanumeric(5);
                             } else {
                                 finalTopic += "." + topic;
@@ -168,33 +176,35 @@ public class BenchRedisProducer implements Runnable {
                         }
                         pipe.sync();
                         producerMeter.mark(pipeline);
-                        if(delay > 0) {
+                        if (delay > 0) {
                             try {
                                 Thread.currentThread().sleep(delay);
-                            } catch (InterruptedException e) {}
+                            } catch (InterruptedException e) {
+                            }
                         }
                     }
                 } else {
-                    for(int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); ++i) {
+                    for (int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); ++i) {
                         String finalTopic = baseTopic;
-                        if(topic.isEmpty()) {
+                        if (topic.isEmpty()) {
                             finalTopic += "." + RandomStringUtils.randomAlphanumeric(5);
                         } else {
                             finalTopic += "." + topic;
                         }
                         jedis.publish(finalTopic, message);
                         producerMeter.mark(1);
-                        if(delay > 0) {
+                        if (delay > 0) {
                             try {
                                 Thread.currentThread().sleep(delay);
-                            } catch (InterruptedException e) {}
+                            } catch (InterruptedException e) {
+                            }
                         }
                     }
                 }
             } catch (Exception e) {
                 LOGGER.warn("Exception in publish: {}", e.toString());
             }
-            if(Thread.currentThread().isInterrupted()) {
+            if (Thread.currentThread().isInterrupted()) {
                 LOGGER.info("{} interrupted...", Thread.currentThread().getName());
             } else {
                 LOGGER.info("{} done...", Thread.currentThread().getName());
