@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<Configuration debug="false">
+    <Appenders>
+        <!--
+          This default ConsoleAppender is used to log all NON perf4j messages
+          to System.out
+        -->
+        <Console name="console">
+            <PatternLayout>
+                <Pattern>%d [%r] %-5p %c{1} - %m%n</Pattern>
+            </PatternLayout>
+        </Console>
+        <!-- This file appender is used to output aggregated performance statistics -->
+        <File name="fileAppender">
+            <FileName>producerPerfStats.log</FileName>
+            <PatternLayout>
+                <Pattern>%m%n</Pattern>
+            </PatternLayout>
+        </File>
+    </Appenders>
+    <!-- Loggers -->
+    <Loggers>
+        <!--
+          The root logger sends all log statements EXCEPT those sent to the perf4j
+          logger to System.out.
+        -->
+        <Root>
+            <Level>INFO</Level>
+            <AppenderRef ref="console"/>
+        </Root>
+    </Loggers>
+</Configuration>

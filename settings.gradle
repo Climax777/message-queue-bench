@@ -1,0 +1,5 @@
+rootProject.name = 'message-queue-bench'
+include 'redis'
+
+include 'rabbitmq'
+
