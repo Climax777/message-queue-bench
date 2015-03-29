@@ -3,3 +3,5 @@ include 'redis'
 
 include 'rabbitmq'
 
+include 'kafka'
+

@@ -63,6 +63,7 @@ public class BenchRedisConsumer implements Runnable {
     public static void main(String[] args) throws Exception {
         BenchRedisConsumer consumer = new BenchRedisConsumer(args);
         consumer.run();
+        System.exit(0);
     }
 
     private void parseCommandLine(String[] args) {
@@ -172,6 +173,7 @@ public class BenchRedisConsumer implements Runnable {
         LOGGER.info("Bench done.");
         reporter.report();
         pool.destroy();
+        System.exit(0);
 
     }
 
@@ -225,6 +227,7 @@ public class BenchRedisConsumer implements Runnable {
                 }
             } catch (Exception e) {
                 LOGGER.warn("Exception in subscribe: {}", e.toString());
+                e.printStackTrace();
             }
             if (Thread.currentThread().isInterrupted()) {
                 LOGGER.info("{} interrupted...", Thread.currentThread().getName());

@@ -10,6 +10,7 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/kafka" />
             <option value="$PROJECT_DIR$/rabbitmq" />
             <option value="$PROJECT_DIR$/redis" />
           </set>

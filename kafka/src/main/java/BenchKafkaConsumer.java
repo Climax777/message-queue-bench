@@ -5,20 +5,25 @@
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Slf4jReporter;
+import kafka.consumer.*;
 import org.apache.commons.cli.*;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
-import redis.clients.jedis.JedisPoolConfig;
-import redis.clients.jedis.Pipeline;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.codahale.metrics.MetricRegistry.name;
 
-public class BenchRedisProducer implements Runnable {
+/*import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;*/
+
+public class BenchKafkaConsumer implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
     private final MetricRegistry registry = new MetricRegistry();
     private final Slf4jReporter reporter = Slf4jReporter.forRegistry(registry)
@@ -26,41 +31,36 @@ public class BenchRedisProducer implements Runnable {
             .convertRatesTo(TimeUnit.SECONDS)
             .convertDurationsTo(TimeUnit.MILLISECONDS)
             .build();
-    private final Meter producerMeter = registry.meter(name(BenchRedisProducer.class, "messages", "size"));
+    private final Meter consumerMeter = registry.meter(name(BenchKafkaConsumer.class, "messages", "size"));
+    private final String EXCHANGE_NAME = "rabbit_bench";
     private Options options = new Options();
     private HelpFormatter formatter = new HelpFormatter();
     private String hostname;
     private int port;
-    private int pipeline;
     private int threads;
-    private String topic;
     private String baseTopic;
-    private int size;
     private int duration;
-    private int delay;
     private int messages;
-    private Jedis jedis;
-    private JedisPool pool;
+    private boolean ack;
+    private String groupID;
+    private AtomicInteger numberOfMessages = new AtomicInteger(0);
 
-    public BenchRedisProducer(String[] args) {
+    public BenchKafkaConsumer(String[] args) {
         options.addOption("h", "help", false, "prints this message");
-        options.addOption("P", "pipeline", true, "add this option to enable pipelining, with an optional parameter indicating the batch size");
-        options.addOption("n", "numthreads", true, "add this option to enable multiple producers");
+        options.addOption("n", "numthreads", true, "add this option to enable multiple consumers");
         options.addOption("i", "host", true, "host to connect to");
+        options.addOption("a", "ack", false, "ack");
         options.addOption("p", "port", true, "port to connect to");
         options.addOption("b", "basetopic", true, "base topic to use: base.*");
-        options.addOption("t", "topic", true, "topic to use: base.topic. Defaults to random topic");
-        options.addOption("s", "size", true, "size of messages");
-        options.addOption("d", "duration", true, "duration of messages (first of d or m will close program)");
-        options.addOption("D", "delay", true, "delay in milliseconds between messages (or pipelines when -P is set)");
-        options.addOption("m", "messages", true, "number of messages (first of d or m will close program)");
+        options.addOption("d", "duration", true, "duration of listening for messages (first of d or m will close program)");
+        options.addOption("m", "messages", true, "number of messages to consume (first of d or m will close program)");
+        options.addOption("g", "groupid", true, "group id. Leave blank for random (each consumer will receive all partitions)");
         parseCommandLine(args);
-        pool = new JedisPool(new JedisPoolConfig(), hostname, port);
     }
 
     public static void main(String[] args) throws Exception {
-        BenchRedisProducer producer = new BenchRedisProducer(args);
-        producer.run();
+        BenchKafkaConsumer consumer = new BenchKafkaConsumer(args);
+        consumer.run();
         System.exit(0);
     }
 
@@ -73,36 +73,25 @@ public class BenchRedisProducer implements Runnable {
             }
 
             hostname = commandLine.getOptionValue('i', "localhost");
-            port = Integer.parseInt(commandLine.getOptionValue('p', "6379"));
-            pipeline = Integer.parseInt(commandLine.getOptionValue('P', "50"));
-            if (pipeline < 0) {
-                throw new ParseException("pipeline must be >= 1");
-            }
+            port = Integer.parseInt(commandLine.getOptionValue('p', "2181"));
             threads = Integer.parseInt(commandLine.getOptionValue('n', String.valueOf(Runtime.getRuntime().availableProcessors())));
             if (threads <= 0) {
                 throw new ParseException("threads must be >= 1");
             }
             baseTopic = commandLine.getOptionValue('b', "bench");
-            topic = commandLine.getOptionValue('t', "");
-            size = Integer.parseInt(commandLine.getOptionValue('s', "512"));
-            if (size < 0) {
-                throw new ParseException("size must be >= 0");
-            }
-            duration = Integer.parseInt(commandLine.getOptionValue('d', "0"));
+            duration = Integer.parseInt(commandLine.getOptionValue('d', Integer.toString(60 * 5)));
             if (duration < 0) {
                 throw new ParseException("duration must be >= 0");
             }
-            delay = Integer.parseInt(commandLine.getOptionValue('D', "0"));
-            if (delay < 0) {
-                throw new ParseException("delay must be >= 0");
-            }
-            messages = Integer.parseInt(commandLine.getOptionValue('m', "100000"));
+            groupID = commandLine.getOptionValue('g', "");
+            messages = Integer.parseInt(commandLine.getOptionValue('m', "0"));
             if (messages < 0) {
                 throw new ParseException("messages must be >= 0");
             }
             if (messages == 0 && duration == 0) {
                 throw new ParseException("messages or duration must be > 0");
             }
+            ack = commandLine.hasOption('a');
         } catch (ParseException e) {
             LOGGER.error("Parse error: " + e.getMessage());
             printHelp();
@@ -120,7 +109,7 @@ public class BenchRedisProducer implements Runnable {
         reporter.start(5, TimeUnit.SECONDS);
         LOGGER.info("Starting {} threads", threads);
         for (int i = 0; i < threads; ++i) {
-            threadGroup[i] = new Thread(new BenchRunner(), "Producer-" + Integer.toString(i));
+            threadGroup[i] = new Thread(new BenchRunner(), "Consumer-" + Integer.toString(i));
             threadGroup[i].start();
         }
         Thread timeKiller = null;
@@ -150,62 +139,62 @@ public class BenchRedisProducer implements Runnable {
         }
         if (timeKiller != null) {
             timeKiller.interrupt();
+            try {
+                timeKiller.join();
+            } catch (InterruptedException e) {
+            }
         }
         LOGGER.info("Bench done.");
         reporter.report();
-        pool.destroy();
         System.exit(0);
-
     }
 
     public final class BenchRunner implements Runnable {
         @Override
         public void run() {
             LOGGER.info("{} running...", Thread.currentThread().getName());
-            String message = RandomStringUtils.randomAlphanumeric(size);
-            try (Jedis jedis = pool.getResource()) {
-                if (pipeline > 0) {
-                    for (int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); i += pipeline) {
-                        Pipeline pipe = jedis.pipelined();
-                        for (int j = 0; j < pipeline; ++j) {
-                            String finalTopic = baseTopic;
-                            if (topic.isEmpty()) {
-                                finalTopic += "." + RandomStringUtils.randomAlphanumeric(5);
-                            } else {
-                                finalTopic += "." + topic;
-                            }
-                            pipe.publish(finalTopic, message);
-                        }
-                        pipe.sync();
-                        producerMeter.mark(pipeline);
-                        if (delay > 0) {
-                            try {
-                                Thread.currentThread().sleep(delay);
-                            } catch (InterruptedException e) {
-                            }
-                        }
-                    }
-                } else {
-                    for (int i = 0; ((messages == 0) || (i < messages)) && !Thread.currentThread().isInterrupted(); ++i) {
-                        String finalTopic = baseTopic;
-                        if (topic.isEmpty()) {
-                            finalTopic += "." + RandomStringUtils.randomAlphanumeric(5);
-                        } else {
-                            finalTopic += "." + topic;
-                        }
-                        jedis.publish(finalTopic, message);
-                        producerMeter.mark(1);
-                        if (delay > 0) {
-                            try {
-                                Thread.currentThread().sleep(delay);
-                            } catch (InterruptedException e) {
-                            }
-                        }
+            try {
+
+                Properties kafkaProperties = new Properties();
+                kafkaProperties.put("zookeeper.connect", hostname + ":" + port);
+                kafkaProperties.put("auto.commit.enable", (ack) ? "true" : "false");
+                kafkaProperties.put("auto.offset.reset", "largest");
+                if (groupID.isEmpty())
+                    kafkaProperties.put("group.id", RandomStringUtils.randomAlphanumeric(5));
+                ConsumerConfig consumerConfig = new ConsumerConfig(kafkaProperties);
+                kafka.javaapi.consumer.ConsumerConnector consumer = Consumer.createJavaConsumerConnector(consumerConfig);
+                //ZkUtils.maybeDeletePath(kafkaProperties.getProperty("zookeeper.connect"), "/consumers/" + kafkaProperties.getProperty("group.id"));
+                Map<String, Integer> topicMap = new HashMap<>(1);
+                topicMap.put(baseTopic, (int) Thread.currentThread().getId());
+                KafkaStream<byte[], byte[]> stream = consumer.createMessageStreamsByFilter(new Whitelist(baseTopic), 1).get(0);
+                ConsumerIterator<byte[], byte[]> it = stream.iterator();
+                while (!Thread.currentThread().isInterrupted() && (numberOfMessages.get() < messages || messages == 0)) {
+                    while (it.hasNext()) {
+                        it.next();
+                        consumerMeter.mark(1);
+                        numberOfMessages.incrementAndGet();
+                        if (ack)
+                            consumer.commitOffsets();
                     }
                 }
+
+                consumer.commitOffsets();
+                consumer.shutdown();
+               /* while (!Thread.currentThread().isInterrupted() && (numberOfMessages.incrementAndGet() < messages || messages == 0)) {
+                    Map<String, ConsumerRecords> records = consumer.poll(100);
+                    consumerMeter.mark(records.size());
+
+                    if(ack) {
+                        for (ConsumerRecords consumerRecords : records.values()) {
+
+                            consumer.commit(consumerRecords.)
+                        }
+                    }
+
+
+                }*/
             } catch (Exception e) {
-                LOGGER.warn("Exception in publish: {}", e.toString());
-                e.printStackTrace();
+                LOGGER.warn("Exception in subscribe: {}", e.toString());
             }
             if (Thread.currentThread().isInterrupted()) {
                 LOGGER.info("{} interrupted...", Thread.currentThread().getName());

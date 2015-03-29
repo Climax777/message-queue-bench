@@ -39,6 +39,7 @@ public class BenchRabbitMQConsumer implements Runnable {
     private int channels;
     private boolean wildcard;
     private boolean ack;
+    private int prefetch;
     private AtomicInteger numberOfMessages = new AtomicInteger(0);
     private ConnectionFactory factory;
 
@@ -53,6 +54,7 @@ public class BenchRabbitMQConsumer implements Runnable {
         options.addOption("w", "wildcard", false, "use wildcard (mutually exclusive with 't'");
         options.addOption("d", "duration", true, "duration of listening for messages (first of d or m will close program)");
         options.addOption("m", "messages", true, "number of messages to consume (first of d or m will close program)");
+        options.addOption("q", "prefetch", true, "queue prefetch count");
         options.addOption("c", "channels", true, "number of channels to subscribe to (if topic is empty 'c' channels will be subscribed to)");
         parseCommandLine(args);
         factory = new ConnectionFactory();
@@ -64,6 +66,7 @@ public class BenchRabbitMQConsumer implements Runnable {
     public static void main(String[] args) throws Exception {
         BenchRabbitMQConsumer consumer = new BenchRabbitMQConsumer(args);
         consumer.run();
+        System.exit(0);
     }
 
     private void parseCommandLine(String[] args) {
@@ -109,6 +112,10 @@ public class BenchRabbitMQConsumer implements Runnable {
                 LOGGER.info("wildcard forced on");
             }
             ack = commandLine.hasOption('a');
+            prefetch = Integer.parseInt(commandLine.getOptionValue('q', "0"));
+            if (prefetch < 0) {
+                throw new ParseException("prefetch must be >= 0");
+            }
         } catch (ParseException e) {
             LOGGER.error("Parse error: " + e.getMessage());
             printHelp();
@@ -163,6 +170,7 @@ public class BenchRabbitMQConsumer implements Runnable {
         }
         LOGGER.info("Bench done.");
         reporter.report();
+        System.exit(0);
     }
 
     public final class BenchRunner implements Runnable {
@@ -173,6 +181,7 @@ public class BenchRabbitMQConsumer implements Runnable {
                 Connection connection = factory.newConnection();
                 final Channel channel = connection.createChannel();
                 channel.exchangeDeclare(EXCHANGE_NAME, "topic");
+                channel.basicQos(prefetch);
                 String queueName = channel.queueDeclare().getQueue();
                 if (channels == 0) {
                     String finalTopic = baseTopic;
@@ -206,12 +215,9 @@ public class BenchRabbitMQConsumer implements Runnable {
                     }
                 });
 
-                while (!Thread.currentThread().isInterrupted() && (numberOfMessages.incrementAndGet() < messages || messages == 0)) {
+                while (!Thread.currentThread().isInterrupted() && (numberOfMessages.get() < messages || messages == 0)) {
                     Thread.sleep(10);
                 }
-                channel.basicCancel(Thread.currentThread().getName());
-                channel.close();
-                connection.close();
             } catch (Exception e) {
                 LOGGER.warn("Exception in subscribe: {}", e.toString());
             }
